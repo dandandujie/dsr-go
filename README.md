@@ -6,77 +6,62 @@
 
 [![CI](https://github.com/dandandujie/dsr-go/actions/workflows/ci.yml/badge.svg)](https://github.com/dandandujie/dsr-go/actions/workflows/ci.yml)
 
-**English** | [中文](README.zh.md)
+**中文** | [English](README.en.md)
 
-dsr-go is a pure-Go port of
-[deepseek-recipe](https://github.com/deepseek-ai/deepseek-recipe). It uniformly
-converts API requests in different formats into the Conversation format, encodes
-them into prompts for DeepSeek models, and converts model output into responses
-in the corresponding format. Use these packages to connect an inference backend
-to API services that support multiple formats. Model inference, tool execution,
-and HTTP transport must be provided externally.
+dsr-go 是 [deepseek-recipe](https://github.com/deepseek-ai/deepseek-recipe)
+的纯 Go 重写版本。它把不同格式的 API 请求统一转换为 Conversation 格式，编码为
+DeepSeek 模型的 prompt，并把模型输出转换回对应格式的响应。可以用这些包把推理后端
+接入支持多种 API 格式的服务；模型推理、工具执行和 HTTP 传输由调用方提供。
 
-The port is verified against the original Rust implementation: the same inputs
-produce byte-identical prompts, token IDs, streaming events, and responses (see
-[Differential testing](#differential-testing)).
+本项目与原 Rust 实现做了逐字节对比验证：相同输入会得到完全一致的 prompt、token ID、
+流式事件和响应（见[差分测试](#差分测试)）。
 
-## Supported scope
+## 支持范围
 
-- **Request/response formats:** Conversion of Messages, Chat Completions, and
-  Responses requests, streaming responses, and complete responses. Supports
-  text, images, thinking, and client tool calls.
-- **Prompts:** Encoding of DeepSeek V4 and V4.1 conversations into prompts or
-  token IDs, including a pure-Go HuggingFace BPE tokenizer.
-- **Generation settings:** Thinking mode, reasoning effort, `temperature`, `top_p`,
-  and output token limits.
-- **Output parsing:** Thinking, tool calls, JSON object output, and stop
-  sequences.
-- **Images:** Provided as base64 or external URLs, with DeepSeek V4.1
-  preprocessing implemented in pure Go (no OpenCV or cgo).
-- **Tool definitions:** Function tools; the Responses API also supports tool
-  namespaces and the `apply_patch` custom tool.
+- **请求/响应格式**：Messages、Chat Completions、Responses 请求的转换，流式响应和
+  完整响应。支持文本、图片、思考内容和客户端工具调用。
+- **Prompt**：把 DeepSeek V4 / V4.1 会话编码为 prompt 或 token ID，内置纯 Go 实现的
+  HuggingFace BPE tokenizer。
+- **生成参数**：思考模式、reasoning effort、`temperature`、`top_p` 和输出 token 上限。
+- **输出解析**：思考内容、工具调用、JSON 对象输出和停止序列。
+- **图片**：支持 base64 和外部 URL，DeepSeek V4.1 预处理使用纯 Go 实现（不依赖
+  OpenCV，也不需要 cgo）。
+- **工具定义**：函数工具；Responses API 还支持 tool namespace 和 `apply_patch`
+  自定义工具。
 
-## Not yet supported
+## 尚未支持
 
-The same gaps as the Rust implementation:
+与 Rust 版本保持一致：
 
-- Token probabilities (`logprobs` and `top_logprobs`).
-- Document content, audio/video input, and file retrieval by `file_id`.
-- Server tool execution, such as `web_search`.
-- JSON Schema and regex output constraints, or enforcement of tool `strict` settings.
-- Multiple completions per Chat Completions request (`n > 1`).
-- Responses custom tool definitions other than `apply_patch`.
-- Responses conversation storage and context retrieval through
-  `previous_response_id`.
-- Responses encrypted thinking content (`encrypted_content`).
+- token 概率（`logprobs`、`top_logprobs`）。
+- 文档内容、音视频输入，以及通过 `file_id` 获取文件。
+- 服务端工具执行，例如 `web_search`。
+- JSON Schema 与正则输出约束，以及工具 `strict` 设置的强制校验。
+- 单次 Chat Completions 请求返回多个结果（`n > 1`）。
+- `apply_patch` 之外的 Responses 自定义工具定义。
+- Responses 会话存储，以及通过 `previous_response_id` 获取上下文。
+- Responses 加密思考内容（`encrypted_content`）。
 
-Differences from the Rust project:
+与原项目的差异：
 
-- The PyO3 Python bindings are **not** ported; use the Go packages or the
-  example HTTP servers instead.
-- Image preprocessing uses pure Go (`image`, `golang.org/x/image`, and a WebP
-  encoder) instead of OpenCV, so the build needs no cgo and no native
-  dependencies. Resizing uses Catmull-Rom instead of OpenCV's `INTER_CUBIC`, so
-  pixels can differ slightly on high-contrast edges; images are written as
-  lossless WebP instead of lossy quality 90, which is pixel-exact but larger.
-  Target dimensions, token accounting, and padding are identical.
-- The tokenizer is implemented in this repository and reads the bundled
-  `tokenizer.json` files directly.
+- 不移植 PyO3 Python 绑定；请直接使用 Go 包或示例 HTTP 服务。
+- 图片预处理改用纯 Go（标准库 `image`、`golang.org/x/image` 以及 WebP 编码器），
+  不再依赖 OpenCV，构建无需 cgo 和本地依赖。
+- tokenizer 在本仓库内实现，直接读取仓库自带的 `tokenizer.json`。
 
-## Installing
+## 安装
 
 ```sh
 go get github.com/dandandujie/dsr-go
 ```
 
-The module has no cgo dependencies. The only third-party requirements are
-`golang.org/x/image` (image decoding) and
-`github.com/santhosh-tekuri/jsonschema/v6` (tool parameter schema validation).
+本模块没有 cgo 依赖，仅需 `golang.org/x/image`（图片解码）和
+`github.com/santhosh-tekuri/jsonschema/v6`（工具参数 schema 校验）。
 
-## Using dsr-go
+## 使用方式
 
-To convert a Chat Completions request into a DeepSeek V4.1 prompt, see
-[`examples/quickstart`](examples/quickstart/main.go):
+把 Chat Completions 请求转换为 DeepSeek V4.1 prompt，完整示例见
+[`examples/quickstart`](examples/quickstart/main.go)：
 
 ```go
 package main
@@ -110,123 +95,115 @@ func main() {
 }
 ```
 
-Run it from the repository root:
+在仓库根目录运行：
 
 ```sh
 go run ./examples/quickstart
 ```
 
-### Streaming responses
+### 流式响应
 
-`StreamProcessor` converts backend output into Messages, Chat Completions, or
-Responses events. See [`examples/streaming`](examples/streaming/main.go) and the
-[streaming guide](docs/streaming.md).
+`StreamProcessor` 把后端输出转换为 Messages、Chat Completions 或 Responses 事件。
+参见 [`examples/streaming`](examples/streaming/main.go) 和
+[流式响应指南](docs/streaming.md)。
 
-### Encoding and decoding with a tokenizer
+### 使用 tokenizer 编解码
 
-Attach a tokenizer to an encoding to obtain token IDs, or to a stream processor
-to decode token IDs produced by the backend. See
-[`examples/tokenizer`](examples/tokenizer/main.go) and the
-[tokenizer guide](docs/tokenizer.md).
+给 encoding 附加 tokenizer 可以得到 token ID；给 stream processor 附加同一个
+tokenizer 可以解码后端返回的 token ID。参见
+[`examples/tokenizer`](examples/tokenizer/main.go) 和
+[tokenizer 指南](docs/tokenizer.md)。
 
-### Encoding & decoding demo
-
-Run the demo from the repository root:
+### 编解码演示页
 
 ```sh
 go run ./cmd/demo
 ```
 
-Open <http://127.0.0.1:7778>. Set `DEMO_ADDR` to listen elsewhere.
+打开 <http://127.0.0.1:7778>。可用 `DEMO_ADDR` 修改监听地址。
 
-### Example server
+### 示例服务
 
 ```sh
 go run ./cmd/server
 ```
 
-The server listens on <http://127.0.0.1:7777> and serves `POST /v1/chat/completions`,
-`POST /v1/responses`, and `POST /v1/messages` with mock inference. Set
-`SERVER_ADDR` to listen elsewhere.
+服务监听 <http://127.0.0.1:7777>，提供 `POST /v1/chat/completions`、
+`POST /v1/responses`、`POST /v1/messages` 三个接口（使用模拟推理）。可用
+`SERVER_ADDR` 修改监听地址。
 
-## Packages
+## 包结构
 
-| Package | Purpose |
+| 包 | 说明 |
 | --- | --- |
-| [`core`](core) | Shared conversation, message, image, and tool types. |
-| [`core/jsonx`](core/jsonx) | Order-preserving JSON values matching `serde_json`. |
-| [`encoding`](encoding) | Prompt rendering and token encoding. |
-| [`encoding/tokenizer`](encoding/tokenizer) | Pure-Go HuggingFace BPE tokenizer. |
-| [`encoding/v4/dsv4`](encoding/v4/dsv4), [`encoding/v4/dsv41`](encoding/v4/dsv41) | DeepSeek V4 and V4.1 prompt rendering. |
-| [`image`](image) | Image fetching and V4.1 preprocessing. |
-| [`recipe`](recipe) | Protocol conversion and model output parsing. |
-| [`recipe/openai/chatcompletion`](recipe/openai/chatcompletion) | Chat Completions adapter. |
-| [`recipe/openai/responses`](recipe/openai/responses) | Responses adapter. |
-| [`recipe/anthropic/messages`](recipe/anthropic/messages) | Messages adapter. |
-| [`cmd/server`](cmd/server) | HTTP API example with mock inference. |
-| [`cmd/demo`](cmd/demo) | Encoding and decoding demo page. |
+| [`core`](core) | 共享的会话、消息、图片和工具类型。 |
+| [`core/jsonx`](core/jsonx) | 与 `serde_json` 一致的有序 JSON 值模型。 |
+| [`encoding`](encoding) | prompt 渲染与 token 编码。 |
+| [`encoding/tokenizer`](encoding/tokenizer) | 纯 Go 的 HuggingFace BPE tokenizer。 |
+| [`encoding/v4/dsv4`](encoding/v4/dsv4)、[`encoding/v4/dsv41`](encoding/v4/dsv41) | DeepSeek V4 / V4.1 prompt 渲染。 |
+| [`image`](image) | 图片获取与 V4.1 预处理。 |
+| [`recipe`](recipe) | 协议转换与模型输出解析。 |
+| [`recipe/openai/chatcompletion`](recipe/openai/chatcompletion) | Chat Completions 适配器。 |
+| [`recipe/openai/responses`](recipe/openai/responses) | Responses 适配器。 |
+| [`recipe/anthropic/messages`](recipe/anthropic/messages) | Messages 适配器。 |
+| [`cmd/server`](cmd/server) | 使用模拟推理的 HTTP 服务示例。 |
+| [`cmd/demo`](cmd/demo) | 编解码演示页面。 |
 
-## Differential testing
+## 差分测试
 
-The port is validated against the original Rust implementation.
+本项目与原 Rust 实现逐字节对照验证。
 
-`testdata/corpus.jsonl` holds 148 hand-written cases, and
-`testdata/corpus_fuzz.jsonl` holds 2000 randomized cases produced by
-[`tools/fuzzgen`](tools/fuzzgen). The matching reference results are in
-`testdata/goldens/`, generated by the Rust
-[`tools/refgen`](tools/refgen) binary. `golden/` replays every case through the
-Go packages and requires a byte-identical result (after normalising
-timestamps). The cases cover request conversion (including every validation
-error), V4 and V4.1 prompt rendering, prompt token IDs, streaming events with
-randomly split chunks, accumulated responses, image resolution, tokenizer
-round trips, and Python-style JSON and float formatting for all three
-protocols.
+`testdata/corpus.jsonl` 包含 148 个手写用例，`testdata/corpus_fuzz.jsonl` 包含 2000 个由
+[`tools/fuzzgen`](tools/fuzzgen) 生成的随机用例；对应的参考结果在 `testdata/goldens/`，
+由 Rust 版 [`tools/refgen`](tools/refgen) 生成。`golden/` 会用 Go 实现重放每个用例，
+要求结果逐字节一致（时间戳会被归一化）。覆盖范围包括：请求转换（含全部校验错误）、
+V4 与 V4.1 的 prompt 渲染、prompt token ID、随机分片的流式事件、完整响应聚合、
+图片解析、tokenizer 往返，以及三种协议的 Python 风格 JSON 与浮点格式。
 
 ```sh
 go test ./golden/...
 ```
 
-`encoding/tokenizer` is additionally checked against the HuggingFace
-`tokenizers` 0.23.2 oracle: 336 strings per bundled tokenizer file, with
-expected IDs and decoded text. `image` ports the unit tests of the Rust image
-crate and exercises the HTTP fetcher with `httptest` servers.
+`encoding/tokenizer` 另外与 HuggingFace `tokenizers` 0.23.2 对齐：每个内置 tokenizer
+文件 336 条字符串，校验 token ID 与解码文本。`image` 移植了 Rust 图片 crate 的单元
+测试，并用 `httptest` 覆盖 HTTP 抓取。
 
-[`golden/fuzz_test.go`](golden/fuzz_test.go) adds Go fuzz targets for the three
-request converters and for the stream parser. Each target survives millions of
-malformed inputs without a panic or a hang:
+[`golden/fuzz_test.go`](golden/fuzz_test.go) 为三个请求转换器和流式解析器提供 Go fuzz
+目标；每个目标都能在数百万次畸形输入下不 panic、不挂起：
 
 ```sh
 go test ./golden/ -run FuzzStreamProcessor -fuzz FuzzStreamProcessor -fuzztime 60s
 ```
 
-### Reproducing the campaign
+### 复现完整测试活动
 
 ```sh
-# 1. Generate more randomized cases (deterministic for a given seed).
-go run ./tools/fuzzgen -n 2000 -seed 20260910 -o /tmp/corpus_fuzz.jsonl
+# 1. 生成更多随机用例（同一 seed 结果确定）。
+go run ./tools/fuzzgen -n 2000 -seed 20260910 -prefix extra_ -o /tmp/corpus_fuzz.jsonl
 
-# 2. Produce the reference results with the Rust implementation.
-#    See tools/refgen/README.md for the build steps.
+# 2. 用 Rust 实现生成参考结果，构建步骤见 tools/refgen/README.md。
 /path/to/refgen < /tmp/corpus_fuzz.jsonl > /tmp/rust_fuzz.jsonl
 
-# 3. Compare the Go implementation against them.
+# 3. 用 Go 实现对比。
 DSR_EXTRA_CORPUS=/tmp/corpus_fuzz.jsonl DSR_EXTRA_GOLDEN=/tmp/rust_fuzz.jsonl \
   go test ./golden/...
 ```
 
-## Development
+## 开发
 
-See the [development guide](docs/development.md).
+参见[开发指南](docs/development.md)。
 
-## Credits
+## 致谢
 
-dsr-go is an independent Go port of
-[deepseek-recipe](https://github.com/deepseek-ai/deepseek-recipe). The
-differential-test goldens are generated from that implementation, and the
-bundled tokenizer files come from it. See [NOTICE](NOTICE).
+dsr-go 是 [deepseek-recipe](https://github.com/deepseek-ai/deepseek-recipe)
+的独立 Go 移植版本：差分测试的参考结果由该项目生成，随仓库分发的 tokenizer 文件
+也来自该项目。详见 [NOTICE](NOTICE)。
 
-## License
+## 许可
 
-Project code and public documentation are licensed under the
-[MIT License](LICENSE). Bundled tokenizer notices are in
-[static/tokenizers/README.md](static/tokenizers/README.md).
+项目代码与公开文档采用 [MIT 许可](LICENSE)。随仓库分发的 tokenizer 声明见
+[static/tokenizers/README.md](static/tokenizers/README.md)。
+
+## 友情链接
+
+- [LINUX DO](https://linux.do) —— 新的理想型社区
