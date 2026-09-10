@@ -9,7 +9,10 @@
 package golden
 
 import (
+	"context"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,12 +20,15 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/dandandujie/dsr-go/core"
 	"github.com/dandandujie/dsr-go/core/jsonx"
 	"github.com/dandandujie/dsr-go/encoding"
 	"github.com/dandandujie/dsr-go/encoding/tokenizer"
 	"github.com/dandandujie/dsr-go/encoding/v4/dsv4"
 	"github.com/dandandujie/dsr-go/encoding/v4/dsv41"
+	"github.com/dandandujie/dsr-go/image"
 	"github.com/dandandujie/dsr-go/recipe/anthropic/messages"
 	"github.com/dandandujie/dsr-go/recipe/openai/chatcompletion"
 	"github.com/dandandujie/dsr-go/recipe/openai/responses"
@@ -45,6 +51,10 @@ type corpusCase struct {
 	Numbers     []string          `json:"numbers"`
 	SkipSpecial bool              `json:"skip_special_tokens"`
 	Encoding    string            `json:"encoding"`
+	Sources     []imageSourceSpec `json:"sources"`
+	// fuzz marks cases from the randomized corpus, where JSON type-mismatch
+	// wording may differ between serde and encoding/json.
+	fuzz bool
 }
 
 // chunkSpec mirrors the refgen chunk specification.
@@ -172,42 +182,85 @@ func loadTokenizer(name string) (*tokenizer.Tokenizer, error) {
 	return loaded, nil
 }
 
-func loadCorpus(t *testing.T) ([]corpusCase, map[string]string) {
-	t.Helper()
+// corpusFiles returns the committed corpus/golden pairs, plus an ad-hoc pair
+// from DSR_EXTRA_CORPUS and DSR_EXTRA_GOLDEN when set.
+func corpusFiles() [][2]string {
+	pairs := [][2]string{{"corpus.jsonl", filepath.Join("goldens", "rust.jsonl")}}
+	if _, err := os.Stat(filepath.Join("..", "testdata", "corpus_fuzz.jsonl")); err == nil {
+		pairs = append(pairs, [2]string{"corpus_fuzz.jsonl", filepath.Join("goldens", "rust_fuzz.jsonl")})
+	}
+	if extra := os.Getenv("DSR_EXTRA_CORPUS"); extra != "" {
+		pairs = append(pairs, [2]string{extra, os.Getenv("DSR_EXTRA_GOLDEN")})
+	}
+	return pairs
+}
+
+func loadCorpus(tb testing.TB) ([]corpusCase, map[string]string) {
+	tb.Helper()
 	root := filepath.Join("..", "testdata")
-	corpusData, err := os.ReadFile(filepath.Join(root, "corpus.jsonl"))
-	if err != nil {
-		t.Fatalf("read corpus: %v", err)
-	}
-	goldenData, err := os.ReadFile(filepath.Join(root, "goldens", "rust.jsonl"))
-	if err != nil {
-		t.Fatalf("read goldens: %v", err)
-	}
 	var cases []corpusCase
-	for _, line := range strings.Split(strings.TrimSpace(string(corpusData)), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		var item corpusCase
-		if err := json.Unmarshal([]byte(line), &item); err != nil {
-			t.Fatalf("parse corpus line: %v", err)
-		}
-		cases = append(cases, item)
-	}
 	goldens := make(map[string]string)
-	for _, line := range strings.Split(strings.TrimSpace(string(goldenData)), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
+	for index, pair := range corpusFiles() {
+		corpusPath := filepath.Join(root, pair[0])
+		goldenPath := filepath.Join(root, pair[1])
+		if filepath.IsAbs(pair[0]) {
+			corpusPath = pair[0]
 		}
-		var item struct {
-			Name string `json:"name"`
+		if filepath.IsAbs(pair[1]) {
+			goldenPath = pair[1]
 		}
-		if err := json.Unmarshal([]byte(line), &item); err != nil {
-			t.Fatalf("parse golden line: %v", err)
+		corpusData, err := os.ReadFile(corpusPath)
+		if err != nil {
+			tb.Fatalf("read corpus %s: %v", pair[0], err)
 		}
-		goldens[item.Name] = line
+		goldenData, err := os.ReadFile(goldenPath)
+		if err != nil {
+			tb.Fatalf("read goldens %s: %v", pair[1], err)
+		}
+		isFuzz := index > 0
+		for _, line := range strings.Split(strings.TrimSpace(string(corpusData)), "\n") {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			var item corpusCase
+			if err := json.Unmarshal([]byte(line), &item); err != nil {
+				tb.Fatalf("parse corpus line: %v", err)
+			}
+			item.fuzz = isFuzz
+			cases = append(cases, item)
+		}
+		for _, line := range strings.Split(strings.TrimSpace(string(goldenData)), "\n") {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			var item struct {
+				Name string `json:"name"`
+			}
+			if err := json.Unmarshal([]byte(line), &item); err != nil {
+				tb.Fatalf("parse golden line: %v", err)
+			}
+			goldens[item.Name] = line
+		}
 	}
 	return cases, goldens
+}
+
+// sameErrorKind reports whether two results are both failures with the same
+// error kind, differing only in the human-readable detail.
+func sameErrorKind(want, got string) bool {
+	var wantValue, gotValue struct {
+		OK    bool `json:"ok"`
+		Error struct {
+			Kind string `json:"kind"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(want), &wantValue); err != nil {
+		return false
+	}
+	if err := json.Unmarshal([]byte(got), &gotValue); err != nil {
+		return false
+	}
+	return !wantValue.OK && !gotValue.OK && wantValue.Error.Kind == gotValue.Error.Kind
 }
 
 func TestGoldenCorpus(t *testing.T) {
@@ -233,6 +286,10 @@ func TestGoldenCorpus(t *testing.T) {
 			wantText := normalizeVolatile(want)
 			gotText := normalizeVolatile(*got)
 			if wantText != gotText {
+				if item.fuzz && sameErrorKind(wantText, gotText) {
+					t.Logf("error detail wording differs (kind matches)\nwant: %s\n got: %s", wantText, gotText)
+					return
+				}
 				t.Errorf("reference mismatch\nwant: %s\n got: %s", wantText, gotText)
 			}
 		})
@@ -244,6 +301,8 @@ func TestGoldenCorpus(t *testing.T) {
 // operation is not implemented.
 func runCase(item corpusCase, registry map[string]*adapter) (*string, error) {
 	switch item.Op {
+	case "image":
+		return runImageCase(item)
 	case "stringify":
 		value, err := jsonx.Parse(item.Value)
 		if err != nil {
@@ -360,6 +419,100 @@ func runCase(item corpusCase, registry map[string]*adapter) (*string, error) {
 	return nil, fmt.Errorf("unknown op %q", item.Op)
 }
 
+// imageSourceSpec mirrors the reference generator image source specification.
+type imageSourceSpec struct {
+	Kind    string `json:"kind"`
+	DataURL string `json:"data_url"`
+	URL     string `json:"url"`
+	Hex     string `json:"hex"`
+	Detail  string `json:"detail"`
+}
+
+// imageStubFetcher mirrors the reference generator fetcher.
+type imageStubFetcher struct{}
+
+var (
+	fetchSeenMu sync.Mutex
+	fetchSeen   = map[string]bool{}
+)
+
+func (imageStubFetcher) Fetch(_ context.Context, url string, budget *image.ImageByteBudget) ([]byte, error) {
+	if strings.Contains(url, "fail-always") {
+		return nil, image.NewFetchError(url, errors.New("stub failure"))
+	}
+	if strings.Contains(url, "fail-once") {
+		fetchSeenMu.Lock()
+		first := !fetchSeen[url]
+		fetchSeen[url] = true
+		fetchSeenMu.Unlock()
+		if first {
+			return nil, image.NewFetchError(url, errors.New("stub transient failure"))
+		}
+	}
+	data := []byte("bytes:" + url)
+	if err := budget.Reserve(len(data)); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+// imageStubPreprocessor mirrors the reference generator preprocessor.
+type imageStubPreprocessor struct{}
+
+func (imageStubPreprocessor) Preprocess(_ context.Context, data []byte, options image.PreprocessOptions) (core.ImageInfo, error) {
+	length := len(data)
+	out := make([]byte, 0, length+32)
+	out = append(out, data...)
+	out = append(out, []byte(fmt.Sprintf("|%s|%d|%d", options.Detail.String(), options.MaxDimensionPx, options.LowDetailMaxDimensionPx))...)
+	return core.ImageInfo{Data: out, Width: uint32(length%97 + 1), Height: uint32(length/97 + 1)}, nil
+}
+
+// runImageCase resolves image sources with the same stubs as the reference
+// generator and dumps the result.
+func runImageCase(item corpusCase) (*string, error) {
+	sources := make([]core.ImageSource, 0, len(item.Sources))
+	for _, spec := range item.Sources {
+		detail := core.ImageDetailHigh
+		if parsed, ok := core.ParseImageDetail(spec.Detail); ok {
+			detail = parsed
+		}
+		switch spec.Kind {
+		case "data_url":
+			sources = append(sources, core.DataURLImageSource(spec.DataURL, detail))
+		case "url":
+			sources = append(sources, core.URLImageSource(spec.URL, detail))
+		case "bytes":
+			data, err := hex.DecodeString(spec.Hex)
+			if err != nil {
+				return nil, err
+			}
+			sources = append(sources, core.BytesImageSource(data, detail))
+		default:
+			return nil, fmt.Errorf("unknown image source kind %q", spec.Kind)
+		}
+	}
+	quota := image.NewImageQuota()
+	resolver := image.NewImageResolver(imageStubFetcher{}, imageStubPreprocessor{}).
+		WithRetry(image.NewRetryPolicy([]time.Duration{0, 0}))
+	data, err := resolver.Resolve(sources, quota)
+	if err != nil {
+		return encodeError(item.Name, request.BadRequest(err.Error())), nil
+	}
+	images := make(jsonx.Array, 0, len(data.Images))
+	for _, resolved := range data.Images {
+		entry := jsonx.NewObject()
+		entry.Set("width", int64(resolved.Width))
+		entry.Set("height", int64(resolved.Height))
+		entry.Set("data", hex.EncodeToString(resolved.Data))
+		images = append(images, entry)
+	}
+	result := jsonx.NewObject()
+	result.Set("images", images)
+	result.Set("quota_images", int64(quota.ImageCount()))
+	result.Set("quota_bytes", int64(quota.ByteSize()))
+	return encodeResult(item.Name, result), nil
+}
+
 func runStream(item corpusCase, impl *adapter, converted *request.ConversationRequest) (*string, error) {
 	specs, err := decodeChunks(item.Chunks)
 	if err != nil {
@@ -369,7 +522,7 @@ func runStream(item corpusCase, impl *adapter, converted *request.ConversationRe
 	processor := stream.NewProcessor(generator, converted.ParsingOptions)
 	inference, err := buildChunks(specs, item.Tokenizer)
 	if err != nil {
-		return nil, err
+		return encodeError(item.Name, request.BadRequest(err.Error())), nil
 	}
 	if needsTokenizer(specs) {
 		loaded, err := loadTokenizer(item.Tokenizer)
@@ -413,7 +566,7 @@ func runComplete(item corpusCase, impl *adapter, converted *request.Conversation
 	processor := stream.NewProcessor(generator, converted.ParsingOptions)
 	inference, err := buildChunks(specs, item.Tokenizer)
 	if err != nil {
-		return nil, err
+		return encodeError(item.Name, request.BadRequest(err.Error())), nil
 	}
 	accumulator := impl.newResponse("mock-id", "deepseek-flash", 0)
 	for _, chunk := range inference {
@@ -482,6 +635,9 @@ func buildChunks(specs []chunkSpec, tokenizerName string) ([]stream.InferenceChu
 		case "token":
 			chunks = append(chunks, stream.NewTokenChunk(spec.TokenID))
 		case "token_text":
+			if tokenizerName == "" {
+				return nil, errTokenTextWithoutTokenizer
+			}
 			loaded, err := loadTokenizer(tokenizerName)
 			if err != nil {
 				return nil, err
@@ -508,6 +664,10 @@ func buildChunks(specs []chunkSpec, tokenizerName string) ([]stream.InferenceChu
 	}
 	return chunks, nil
 }
+
+// errTokenTextWithoutTokenizer mirrors the reference generator, which refuses a
+// token_text chunk when the case carries no tokenizer.
+var errTokenTextWithoutTokenizer = errors.New("token_text chunk requires a tokenizer")
 
 func encodeResult(name string, result jsonx.Value) *string {
 	out := jsonx.NewObject()

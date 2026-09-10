@@ -51,14 +51,33 @@ go run ./cmd/server    # http://127.0.0.1:7777
 
 ## Differential testing
 
-The port is validated against the original Rust implementation. Every case in
-`testdata/corpus.jsonl` is replayed through both implementations and the compact
-JSON results must match byte for byte (timestamps are normalised).
+The port is validated against the original Rust implementation. The test
+corpus lives in `testdata/` and the reference results in `testdata/goldens/`;
+`golden/` replays every case through the Go packages and requires byte-identical
+output (timestamps are normalised).
 
-The reference results in `testdata/goldens/rust.jsonl` are produced by
-[`tools/refgen`](tools/refgen), a Rust binary that depends on the original
-crates. See [`tools/refgen/README.md`](tools/refgen/README.md) for the complete
-regeneration procedure.
+| File | Contents |
+| --- | --- |
+| `testdata/corpus.jsonl` | 136 hand-written cases for all three protocols. |
+| `testdata/corpus_fuzz.jsonl` | 2000 randomized cases from `tools/fuzzgen`. |
+| `testdata/goldens/rust.jsonl` | Reference results for the hand-written cases. |
+| `testdata/goldens/rust_fuzz.jsonl` | Reference results for the randomized cases. |
+
+The reference results are produced by [`tools/refgen`](../tools/refgen), a Rust
+binary built on the original crates. See
+[`tools/refgen/README.md`](../tools/refgen/README.md) for the regeneration
+procedure, including how to add cases and how to run the campaign against a
+larger randomized corpus.
+
+`golden/fuzz_test.go` holds Go fuzz targets for the converters and the stream
+parser; a short campaign per target covers millions of malformed inputs:
+
+```sh
+go test ./golden/ -run FuzzChatCompletionsConvert -fuzz FuzzChatCompletionsConvert -fuzztime 60s
+go test ./golden/ -run FuzzResponsesConvert -fuzz FuzzResponsesConvert -fuzztime 60s
+go test ./golden/ -run FuzzMessagesConvert -fuzz FuzzMessagesConvert -fuzztime 60s
+go test ./golden/ -run FuzzStreamProcessor -fuzz FuzzStreamProcessor -fuzztime 60s
+```
 
 ## Conventions
 

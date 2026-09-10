@@ -53,7 +53,13 @@ the Go tests. A case has this shape:
 ```
 
 Supported operations: `convert` (conversation and options dump), `render`
-(V4.1 prompt plus its image sources), `encode` (prompt token IDs), `stream`
-(protocol events for a list of mock inference chunks), `complete` (accumulated
-protocol response), `tokenize` / `detokenize` (tokenizer round trips),
-`stringify` (Python-style JSON rendering) and `numbers` (float formatting).
+(V4 or V4.1 prompt plus its image sources), `encode` (prompt token IDs),
+`stream` (protocol events for a list of mock inference chunks), `complete`
+(accumulated protocol response), `tokenize` / `detokenize` (tokenizer round
+trips), `image` (image resolution with a deterministic stub fetcher and
+preprocessor), `stringify` (Python-style JSON rendering) and `numbers`
+(float formatting).
+
+Set `"encoding": "v4"` on a `render` or `encode` case to use the V4
+template; the default is V4.1. Tokenizers are loaded once and cached for the
+whole run.

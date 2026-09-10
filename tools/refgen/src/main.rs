@@ -15,11 +15,17 @@ use deepseek_recipe::stream::{
 use deepseek_recipe::util::append_delta::AppendDelta;
 use deepseek_recipe_core::conversation::{Conversation, ReasoningEffort, ResponseFormat};
 use deepseek_recipe_core::messages::InputMessage;
-use deepseek_recipe_core::multimodal::{ImageDetail, ImageSource};
+use deepseek_recipe_core::multimodal::{ImageDetail, ImageInfo, ImageSource};
 use deepseek_recipe_core::tools::ToolChoice;
 use deepseek_recipe_core::util::json_formatter::stringify_python_style;
 use deepseek_recipe_encoding::PromptEncoding;
+use deepseek_recipe_encoding::v4::dsv4::DeepseekV4Encoding;
 use deepseek_recipe_encoding::v4::dsv41::DeepseekV41Encoding;
+use deepseek_recipe_image::{
+    ImageByteBudget, ImageError, ImageFetcher, ImagePreprocessor, ImageQuota, ImageResolver,
+    PreprocessOptions, RetryPolicy,
+};
+use std::time::Duration;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -48,6 +54,30 @@ struct Case {
     numbers: Option<Vec<String>>,
     #[serde(default)]
     skip_special_tokens: Option<bool>,
+    #[serde(default)]
+    encoding: Option<String>,
+    #[serde(default)]
+    sources: Option<Vec<SourceSpec>>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum SourceSpec {
+    DataUrl {
+        data_url: String,
+        #[serde(default)]
+        detail: Option<String>,
+    },
+    Url {
+        url: String,
+        #[serde(default)]
+        detail: Option<String>,
+    },
+    Bytes {
+        hex: String,
+        #[serde(default)]
+        detail: Option<String>,
+    },
 }
 
 #[derive(Clone, Deserialize)]
@@ -282,11 +312,23 @@ where
 }
 
 fn load_tokenizer(name: &str) -> Result<Tokenizer, ConversionError> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static CACHE: OnceLock<Mutex<HashMap<String, Tokenizer>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().expect("tokenizer cache lock");
+    if let Some(tokenizer) = guard.get(name) {
+        return Ok(tokenizer.clone());
+    }
     let path = format!(
         "{}/../../static/tokenizers/{name}/tokenizer.json",
         env!("CARGO_MANIFEST_DIR")
     );
-    Tokenizer::from_file(path).map_err(|error| ConversionError::internal(error.to_string()))
+    let tokenizer = Tokenizer::from_file(path)
+        .map_err(|error| ConversionError::internal(error.to_string()))?;
+    guard.insert(name.to_string(), tokenizer.clone());
+    Ok(tokenizer)
 }
 
 fn failure(error: ConversionError) -> Value {
@@ -306,28 +348,38 @@ fn success(result: Value) -> Value {
     json!({"ok": true, "result": result})
 }
 
-fn run_text<T>(body: Value) -> Result<Value, ConversionError>
+fn run_text<T>(body: Value, encoding_name: &str) -> Result<Value, ConversionError>
 where
     T: ProtocolRequest + DeserializeOwned,
 {
     let request = convert::<T>(body)?;
-    let rendered = DeepseekV41Encoding::new().render_conversation(&request.conversation);
+    let rendered = if encoding_name == "v4" {
+        DeepseekV4Encoding::new().render_conversation(&request.conversation)
+    } else {
+        DeepseekV41Encoding::new().render_conversation(&request.conversation)
+    };
     Ok(json!({
         "prompt": rendered.prompt,
         "image_sources": dump_images(&rendered.image_sources),
     }))
 }
 
-fn run_encode<T>(body: Value, tokenizer: &str) -> Result<Value, ConversionError>
+fn run_encode<T>(body: Value, tokenizer: &str, encoding_name: &str) -> Result<Value, ConversionError>
 where
     T: ProtocolRequest + DeserializeOwned,
 {
     let request = convert::<T>(body)?;
     let tokenizer = load_tokenizer(tokenizer)?;
-    let encoding = DeepseekV41Encoding::new().with_tokenizer(tokenizer);
-    let ids = encoding
-        .encode(&request.conversation)
-        .map_err(|error| ConversionError::internal(error.to_string()))?;
+    let ids = if encoding_name == "v4" {
+        DeepseekV4Encoding::new()
+            .with_tokenizer(tokenizer)
+            .encode(&request.conversation)
+    } else {
+        DeepseekV41Encoding::new()
+            .with_tokenizer(tokenizer)
+            .encode(&request.conversation)
+    }
+    .map_err(|error| ConversionError::internal(error.to_string()))?;
     Ok(json!({"ids": ids}))
 }
 
@@ -402,18 +454,22 @@ async fn handle(case: Case) -> Value {
             };
             convert_call(body).await
         }
-        "render" => match protocol.as_str() {
-            "chat_completions" => run_text::<ChatCompletionRequest>(case.body.clone().unwrap_or(Value::Null)),
-            "responses" => run_text::<ResponsesRequest>(case.body.clone().unwrap_or(Value::Null)),
-            "messages" => run_text::<MessagesRequest>(case.body.clone().unwrap_or(Value::Null)),
-            other => Err(ConversionError::bad_request(format!("unknown protocol: {other}"))),
-        },
-        "encode" => {
-            let tokenizer = case.tokenizer.clone().unwrap_or_else(|| "v41".to_string());
+        "render" => {
+            let encoding = case.encoding.clone().unwrap_or_else(|| "v41".to_string());
             match protocol.as_str() {
-                "chat_completions" => run_encode::<ChatCompletionRequest>(case.body.clone().unwrap_or(Value::Null), &tokenizer),
-                "responses" => run_encode::<ResponsesRequest>(case.body.clone().unwrap_or(Value::Null), &tokenizer),
-                "messages" => run_encode::<MessagesRequest>(case.body.clone().unwrap_or(Value::Null), &tokenizer),
+                "chat_completions" => run_text::<ChatCompletionRequest>(case.body.clone().unwrap_or(Value::Null), &encoding),
+                "responses" => run_text::<ResponsesRequest>(case.body.clone().unwrap_or(Value::Null), &encoding),
+                "messages" => run_text::<MessagesRequest>(case.body.clone().unwrap_or(Value::Null), &encoding),
+                other => Err(ConversionError::bad_request(format!("unknown protocol: {other}"))),
+            }
+        }
+        "encode" => {
+            let encoding = case.encoding.clone().unwrap_or_else(|| "v41".to_string());
+            let tokenizer = case.tokenizer.clone().unwrap_or_else(|| encoding.clone());
+            match protocol.as_str() {
+                "chat_completions" => run_encode::<ChatCompletionRequest>(case.body.clone().unwrap_or(Value::Null), &tokenizer, &encoding),
+                "responses" => run_encode::<ResponsesRequest>(case.body.clone().unwrap_or(Value::Null), &tokenizer, &encoding),
+                "messages" => run_encode::<MessagesRequest>(case.body.clone().unwrap_or(Value::Null), &tokenizer, &encoding),
                 other => Err(ConversionError::bad_request(format!("unknown protocol: {other}"))),
             }
         }
@@ -426,6 +482,7 @@ async fn handle(case: Case) -> Value {
             let specs = case.chunks.clone().unwrap_or_default();
             with_protocol!(protocol, run_complete, case.body.clone().unwrap_or(Value::Null), &specs)
         }
+        "image" => run_image(&case).await,
         "tokenize" => match load_tokenizer(&case.tokenizer.clone().unwrap_or_else(|| "v41".to_string())) {
             Ok(tokenizer) => tokenizer
                 .encode(case.text.clone().unwrap_or_default(), false)
@@ -492,5 +549,141 @@ async fn main() {
             Err(error) => json!({"ok": false, "error": {"kind": "case", "detail": error.to_string()}}),
         };
         let _ = writeln!(out, "{}", serde_json::to_string(&result).unwrap_or_default());
+    }
+}
+// ---------------------------------------------------------------- images
+
+/// Stub fetcher: deterministic bytes derived from the URL, with two failure
+/// modes so retry behaviour is exercised.
+struct RefgenFetcher;
+
+fn first_attempt(url: &str) -> bool {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+
+    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut guard = seen.lock().expect("fetch state lock");
+    guard.insert(url.to_string())
+}
+
+impl ImageFetcher for RefgenFetcher {
+    async fn fetch(&self, url: &str, budget: &ImageByteBudget) -> Result<Vec<u8>, ImageError> {
+        if url.contains("fail-always") {
+            return Err(ImageError::Fetch {
+                url: url.to_string(),
+                source: Box::new(std::io::Error::other("stub failure")),
+            });
+        }
+        if url.contains("fail-once") && first_attempt(url) {
+            return Err(ImageError::Fetch {
+                url: url.to_string(),
+                source: Box::new(std::io::Error::other("stub transient failure")),
+            });
+        }
+        let data = format!("bytes:{url}").into_bytes();
+        budget.reserve(data.len())?;
+        Ok(data)
+    }
+}
+
+/// Stub preprocessor: deterministic dimensions and an option fingerprint.
+struct RefgenPreprocessor;
+
+impl ImagePreprocessor for RefgenPreprocessor {
+    async fn preprocess(
+        &self,
+        data: Vec<u8>,
+        options: PreprocessOptions,
+    ) -> Result<ImageInfo, ImageError> {
+        let len = data.len();
+        let mut out = data;
+        out.extend_from_slice(
+            format!(
+                "|{}|{}|{}",
+                detail_name(options.detail),
+                options.max_dimension_px,
+                options.low_detail_max_dimension_px
+            )
+            .as_bytes(),
+        );
+        Ok(ImageInfo {
+            data: out,
+            width: (len % 97 + 1) as u32,
+            height: (len / 97 + 1) as u32,
+        })
+    }
+}
+
+fn hex_encode(data: &[u8]) -> String {
+    let mut out = String::with_capacity(data.len() * 2);
+    for byte in data {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+fn parse_detail(name: &Option<String>) -> ImageDetail {
+    match name.as_deref() {
+        Some("low") => ImageDetail::Low,
+        Some("original") => ImageDetail::Original,
+        Some("auto") => ImageDetail::Auto,
+        _ => ImageDetail::High,
+    }
+}
+
+fn parse_image_sources(specs: &[SourceSpec]) -> Vec<ImageSource> {
+    specs
+        .iter()
+        .map(|spec| match spec {
+            SourceSpec::DataUrl { data_url, detail } => ImageSource::DataUrl {
+                data_url: data_url.clone(),
+                detail: parse_detail(detail),
+            },
+            SourceSpec::Url { url, detail } => ImageSource::Url {
+                url: url.clone(),
+                detail: parse_detail(detail),
+            },
+            SourceSpec::Bytes { hex, detail } => ImageSource::Bytes {
+                data: hex_decode(hex),
+                detail: parse_detail(detail),
+            },
+        })
+        .collect()
+}
+
+fn hex_decode(text: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len() / 2);
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index + 1 < bytes.len() {
+        let high = (bytes[index] as char).to_digit(16).unwrap_or(0) as u8;
+        let low = (bytes[index + 1] as char).to_digit(16).unwrap_or(0) as u8;
+        out.push(high * 16 + low);
+        index += 2;
+    }
+    out
+}
+
+async fn run_image(case: &Case) -> Result<Value, ConversionError> {
+    let sources = parse_image_sources(&case.sources.clone().unwrap_or_default());
+    let mut quota = ImageQuota::new();
+    let resolver = ImageResolver::new(RefgenFetcher, RefgenPreprocessor)
+        .with_retry(RetryPolicy::new(vec![Duration::ZERO, Duration::ZERO]));
+    match resolver.resolve(&sources, &mut quota).await {
+        Ok(data) => Ok(json!({
+            "images": data
+                .images
+                .iter()
+                .map(|image| json!({
+                    "width": image.width,
+                    "height": image.height,
+                    "data": hex_encode(&image.data),
+                }))
+                .collect::<Vec<_>>(),
+            "quota_images": quota.image_count(),
+            "quota_bytes": quota.byte_size(),
+        })),
+        Err(error) => Err(ConversionError::bad_request(error.to_string())),
     }
 }

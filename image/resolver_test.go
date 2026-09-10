@@ -2,10 +2,10 @@ package image
 
 import (
 	"context"
-	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/dandandujie/dsr-go/core"
 )
@@ -21,9 +21,15 @@ func (f fixedFetcher) Fetch(context.Context, string, *ImageByteBudget) ([]byte, 
 }
 
 // countingFetcher records how many of its calls run at the same time.
+//
+// target is the concurrency the caller expects: every call waits until that
+// many calls are active (or the rendezvous times out), so the observed maximum
+// does not depend on goroutine scheduling. The Rust test relies on
+// tokio::task::yield_now for the same effect.
 type countingFetcher struct {
 	active    atomic.Int64
 	maxActive atomic.Int64
+	target    int64
 }
 
 // Fetch records the concurrency of its calls.
@@ -35,7 +41,12 @@ func (f *countingFetcher) Fetch(_ context.Context, _ string, budget *ImageByteBu
 			break
 		}
 	}
-	runtime.Gosched()
+	if f.target > 0 {
+		deadline := time.Now().Add(2 * time.Second)
+		for f.active.Load() < f.target && time.Now().Before(deadline) {
+			time.Sleep(50 * time.Microsecond)
+		}
+	}
 	f.active.Add(-1)
 	if err := budget.Reserve(1); err != nil {
 		return nil, err
@@ -144,7 +155,7 @@ func TestAPreprocessingFailureLeavesTheQuotaUnchanged(t *testing.T) {
 
 func TestResolutionsAreLimitedToMaxConcurrentSources(t *testing.T) {
 	const sourceCount = 6
-	fetcher := &countingFetcher{}
+	fetcher := &countingFetcher{target: 3}
 	requestLimits := limits(8, 64)
 	requestLimits.MaxConcurrentSources = 3
 	resolver := NewImageResolver(fetcher, noPreprocessor{}).WithLimits(requestLimits)
