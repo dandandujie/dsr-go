@@ -27,6 +27,7 @@ func main() {
 	count := flag.Int("n", 1500, "number of cases to generate")
 	seed := flag.Int64("seed", 20260910, "random seed")
 	out := flag.String("o", "-", "output file, - for stdout")
+	prefix := flag.String("prefix", "", "prefix added to every case name")
 	flag.Parse()
 
 	writer := os.Stdout
@@ -41,7 +42,7 @@ func main() {
 	buffered := bufio.NewWriter(writer)
 	defer func() { _ = buffered.Flush() }()
 
-	generator := &generator{rand: rand.New(rand.NewSource(*seed))}
+	generator := &generator{rand: rand.New(rand.NewSource(*seed)), prefix: *prefix}
 	encoder := json.NewEncoder(buffered)
 	for index := 0; index < *count; index++ {
 		item := generator.caseAt(index)
@@ -55,7 +56,8 @@ func main() {
 }
 
 type generator struct {
-	rand *rand.Rand
+	rand   *rand.Rand
+	prefix string
 }
 
 // caseAt builds one corpus case; the op cycles through the supported kinds.
@@ -91,7 +93,7 @@ func (g *generator) protocolCase(index int, op string) map[string]any {
 		body = g.responsesBody()
 	}
 	item := map[string]any{
-		"name":     fmt.Sprintf("fuzz_%04d_%s_%s", index, protocol, op),
+		"name":     fmt.Sprintf(g.prefix+"fuzz_%04d_%s_%s", index, protocol, op),
 		"op":       op,
 		"protocol": protocol,
 		"body":     body,
@@ -536,7 +538,7 @@ func (g *generator) streamCase(index int) map[string]any {
 		})
 	}
 	item := map[string]any{
-		"name":     fmt.Sprintf("fuzz_%04d_%s_stream", index, protocol),
+		"name":     fmt.Sprintf(g.prefix+"fuzz_%04d_%s_stream", index, protocol),
 		"op":       "stream",
 		"protocol": protocol,
 		"body":     body,
@@ -656,7 +658,7 @@ func (g *generator) tokenizerCase(index int) map[string]any {
 			}
 		}
 		return map[string]any{
-			"name":                fmt.Sprintf("fuzz_%04d_detokenize_%s", index, name),
+			"name":                fmt.Sprintf(g.prefix+"fuzz_%04d_detokenize_%s", index, name),
 			"op":                  "detokenize",
 			"ids":                 ids,
 			"skip_special_tokens": g.rand.Intn(2) == 0,
@@ -664,7 +666,7 @@ func (g *generator) tokenizerCase(index int) map[string]any {
 		}
 	}
 	return map[string]any{
-		"name":      fmt.Sprintf("fuzz_%04d_tokenize_%s", index, name),
+		"name":      fmt.Sprintf(g.prefix+"fuzz_%04d_tokenize_%s", index, name),
 		"op":        "tokenize",
 		"text":      g.randomText(),
 		"tokenizer": name,
@@ -739,7 +741,7 @@ func (g *generator) imageCase(index int) map[string]any {
 		}
 	}
 	return map[string]any{
-		"name":    fmt.Sprintf("fuzz_%04d_image", index),
+		"name":    fmt.Sprintf(g.prefix+"fuzz_%04d_image", index),
 		"op":      "image",
 		"sources": sources,
 	}

@@ -6,6 +6,8 @@ cases.
 
 ```sh
 go run ./tools/fuzzgen -n 2000 -seed 20260910 -o testdata/corpus_fuzz.jsonl
+
+# Ad-hoc campaigns should use -prefix so case names stay unique.
 ```
 
 The committed `testdata/corpus_fuzz.jsonl` (2000 cases) and its reference

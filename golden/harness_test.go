@@ -234,6 +234,10 @@ func loadCorpus(tb testing.TB) ([]corpusCase, map[string]string) {
 			tb.Fatalf("read goldens %s: %v", pair[1], err)
 		}
 		isFuzz := index > 0
+		seen := make(map[string]bool, len(cases))
+		for _, existing := range cases {
+			seen[existing.Name] = true
+		}
 		for _, line := range strings.Split(strings.TrimSpace(string(corpusData)), "\n") {
 			if strings.TrimSpace(line) == "" {
 				continue
@@ -242,6 +246,10 @@ func loadCorpus(tb testing.TB) ([]corpusCase, map[string]string) {
 			if err := json.Unmarshal([]byte(line), &item); err != nil {
 				tb.Fatalf("parse corpus line: %v", err)
 			}
+			if seen[item.Name] {
+				tb.Fatalf("duplicate case name %q: use tools/fuzzgen -prefix for ad-hoc corpora", item.Name)
+			}
+			seen[item.Name] = true
 			item.fuzz = isFuzz
 			cases = append(cases, item)
 		}
