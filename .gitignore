@@ -1,0 +1,6 @@
+# Build and test caches
+.gocache/
+bin/
+
+# Rust reference generator build output
+tools/refgen/target/

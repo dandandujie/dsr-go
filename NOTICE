@@ -1,0 +1,12 @@
+dsr-go
+======
+
+dsr-go is an independent Go port of deepseek-recipe
+(https://github.com/deepseek-ai/deepseek-recipe), Copyright (c) 2026 DeepSeek,
+licensed under the MIT License.
+
+The port reproduces the behaviour of the original Rust implementation. The
+bundled tokenizer files under static/tokenizers/ come from that repository;
+their notices are in static/tokenizers/README.md.
+
+The Go implementation is distributed under the MIT License as well; see LICENSE.
