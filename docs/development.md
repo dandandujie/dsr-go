@@ -58,7 +58,7 @@ output (timestamps are normalised).
 
 | File | Contents |
 | --- | --- |
-| `testdata/corpus.jsonl` | 136 hand-written cases for all three protocols. |
+| `testdata/corpus.jsonl` | 148 hand-written cases for all three protocols. |
 | `testdata/corpus_fuzz.jsonl` | 2000 randomized cases from `tools/fuzzgen`. |
 | `testdata/goldens/rust.jsonl` | Reference results for the hand-written cases. |
 | `testdata/goldens/rust_fuzz.jsonl` | Reference results for the randomized cases. |

@@ -6,6 +6,7 @@ use std::io::{self, BufRead, Write};
 use std::pin::pin;
 
 use deepseek_recipe::anthropic::MessagesRequest;
+use deepseek_recipe::openai::responses::response::ResponsesResponse;
 use deepseek_recipe::openai::{ChatCompletionRequest, ResponsesRequest};
 use deepseek_recipe::request::{ConversionError, ConversationRequest, ConversionOptions, ProtocolRequest};
 use deepseek_recipe::response::ProtocolResponse;
@@ -428,6 +429,78 @@ where
         .map_err(|error| ConversionError::internal(error.to_string()))
 }
 
+
+// The Responses example server applies the request custom tool declarations to
+// the generator; these paths mirror that so custom tool output is covered.
+async fn run_stream_responses(
+    body: Value,
+    specs: &[ChunkSpec],
+    tokenizer: Option<&str>,
+) -> Result<Value, ConversionError> {
+    let typed: ResponsesRequest = serde_json::from_value(body).map_err(|error| {
+        ConversionError::bad_request(format!("invalid request body: {error}"))
+    })?;
+    let custom_tool_names = typed.custom_tool_names();
+    let request = typed.convert(ConversionOptions::default())?;
+    let generator = ResponsesRequest::chunk_generator(
+        &request,
+        "mock-id".to_string(),
+        "deepseek-flash".to_string(),
+    )
+    .with_custom_tool_names(custom_tool_names);
+    let mut processor = StreamProcessor::new(generator, request.parsing_options);
+    let mut decoder_tokenizer = None;
+    if let Some(tokenizer) = tokenizer {
+        let loaded = load_tokenizer(tokenizer)?;
+        processor = processor.with_tokenizer(loaded.clone());
+        decoder_tokenizer = Some(loaded);
+    }
+    let inference = inference_chunks(specs, decoder_tokenizer.as_ref())?;
+    let mut chunks = pin!(processor.process(iter(inference)));
+    let mut events = Vec::new();
+    while let Some(chunk) = chunks.next().await {
+        let chunk = chunk.map_err(|error| ConversionError::internal(error.to_string()))?;
+        events.push(
+            serde_json::to_value(&chunk)
+                .map_err(|error| ConversionError::internal(error.to_string()))?,
+        );
+    }
+    Ok(json!({"events": events}))
+}
+
+async fn run_complete_responses(
+    body: Value,
+    specs: &[ChunkSpec],
+) -> Result<Value, ConversionError> {
+    let typed: ResponsesRequest = serde_json::from_value(body).map_err(|error| {
+        ConversionError::bad_request(format!("invalid request body: {error}"))
+    })?;
+    let custom_tool_names = typed.custom_tool_names();
+    let request = typed.convert(ConversionOptions::default())?;
+    let generator = ResponsesRequest::chunk_generator(
+        &request,
+        "mock-id".to_string(),
+        "deepseek-flash".to_string(),
+    )
+    .with_custom_tool_names(custom_tool_names);
+    let processor = StreamProcessor::new(generator, request.parsing_options);
+    let mut response = ResponsesResponse::new(
+        "mock-id".to_string(),
+        "deepseek-flash".to_string(),
+        0,
+        0,
+        0,
+    );
+    let inference = inference_chunks(specs, None)?;
+    let mut chunks = pin!(processor.process(iter(inference)));
+    while let Some(chunk) = chunks.next().await {
+        let chunk = chunk.map_err(|error| ConversionError::internal(error.to_string()))?;
+        response.append(chunk);
+    }
+    serde_json::to_value(response)
+        .map_err(|error| ConversionError::internal(error.to_string()))
+}
+
 macro_rules! with_protocol {
     ($protocol:expr, $call:ident $(, $arg:expr)*) => {
         match $protocol.as_str() {
@@ -476,11 +549,24 @@ async fn handle(case: Case) -> Value {
         "stream" => {
             let specs = case.chunks.clone().unwrap_or_default();
             let tokenizer = case.tokenizer.clone();
-            with_protocol!(protocol, run_stream, case.body.clone().unwrap_or(Value::Null), &specs, tokenizer.as_deref())
+            if protocol == "responses" {
+                run_stream_responses(
+                    case.body.clone().unwrap_or(Value::Null),
+                    &specs,
+                    tokenizer.as_deref(),
+                )
+                .await
+            } else {
+                with_protocol!(protocol, run_stream, case.body.clone().unwrap_or(Value::Null), &specs, tokenizer.as_deref())
+            }
         }
         "complete" => {
             let specs = case.chunks.clone().unwrap_or_default();
-            with_protocol!(protocol, run_complete, case.body.clone().unwrap_or(Value::Null), &specs)
+            if protocol == "responses" {
+                run_complete_responses(case.body.clone().unwrap_or(Value::Null), &specs).await
+            } else {
+                with_protocol!(protocol, run_complete, case.body.clone().unwrap_or(Value::Null), &specs)
+            }
         }
         "image" => run_image(&case).await,
         "tokenize" => match load_tokenizer(&case.tokenizer.clone().unwrap_or_else(|| "v41".to_string())) {

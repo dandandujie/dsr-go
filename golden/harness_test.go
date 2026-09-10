@@ -131,7 +131,23 @@ func newResponsesAdapter() *adapter {
 			if err := json.Unmarshal(body, &typed); err != nil {
 				return nil, request.BadRequestf("invalid request body: %v", err)
 			}
-			return typed.Convert(request.NewConversionOptions())
+			converted, err := typed.Convert(request.NewConversionOptions())
+			if err != nil {
+				return nil, err
+			}
+			// The example server and the reference generator apply the request's
+			// custom tool declarations to the generator, which switches custom
+			// tool output to the custom input parser.
+			names := typed.CustomToolNames()
+			inner := converted.NewChunkGenerator
+			converted.NewChunkGenerator = func(id, model string) stream.Generator {
+				generator := inner(id, model)
+				if responsesGenerator, ok := generator.(*responses.ResponsesChunkGenerator); ok {
+					return responsesGenerator.WithCustomToolNames(names)
+				}
+				return generator
+			}
+			return converted, nil
 		},
 		newGenerator: func(req *request.ConversationRequest, id, model string) stream.Generator {
 			return req.NewChunkGenerator(id, model)
